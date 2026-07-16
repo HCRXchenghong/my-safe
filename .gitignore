@@ -1,0 +1,22 @@
+# Build outputs
+/bin/
+/dist/
+*.exe
+*.test
+
+# Local runtime state and secrets
+/.local/
+*.key
+*.queue
+*.tmp
+.env
+
+# Editors and operating systems
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Bootstrap download artifacts
+/_source/
+/source.zip

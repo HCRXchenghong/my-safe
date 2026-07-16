@@ -1,0 +1,98 @@
+name: signed-release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+  id-token: write
+  attestations: write
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    env:
+      VERSION: ${{ github.ref_name }}
+      MYSAFE_RELEASE_SIGNING_KEY_PEM: ${{ secrets.MYSAFE_RELEASE_SIGNING_KEY_PEM }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.26.x"
+          cache: true
+      - name: Validate release inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "${VERSION}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]
+          test -n "${MYSAFE_RELEASE_SIGNING_KEY_PEM}"
+      - name: Test and build
+        shell: bash
+        run: |
+          set -euo pipefail
+          command -v dpkg-deb
+          bash scripts/build.sh
+          for arch in amd64 arm64; do
+            for component in agent control gateway installer; do
+              test -f "dist/mysafe-${component}-linux-${arch}"
+              test -f "dist/mysafe-${component}-linux-${arch}.deb"
+            done
+          done
+      - name: Sign release manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          key_path="${RUNNER_TEMP}/release-signing-key.pem"
+          printf '%s' "${MYSAFE_RELEASE_SIGNING_KEY_PEM}" > "${key_path}"
+          chmod 0600 "${key_path}"
+          go run -buildvcs=false ./cmd/mysafe-release manifest \
+            --bundle dist \
+            --version "${VERSION}" \
+            --private-key "${key_path}" \
+            --output dist/release-manifest.json \
+            --signature dist/release-manifest.sig
+          go run -buildvcs=false ./cmd/mysafe-release verify \
+            --bundle dist \
+            --manifest dist/release-manifest.json \
+            --signature dist/release-manifest.sig \
+            --public-key deploy/release-public-key.pem
+          cp scripts/bootstrap.sh dist/bootstrap.sh
+          cp deploy/release-public-key.pem dist/release-public-key.pem
+          rm -f "${key_path}"
+      - name: Verify one-command Bootstrap path
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m http.server 18080 --bind 127.0.0.1 --directory dist >"${RUNNER_TEMP}/mysafe-release-http.log" 2>&1 &
+          server_pid=$!
+          trap 'kill "${server_pid}"' EXIT
+          for attempt in {1..20}; do
+            curl -fsS "http://127.0.0.1:18080/release-manifest.json" >/dev/null && break
+            if [[ "${attempt}" == 20 ]]; then
+              cat "${RUNNER_TEMP}/mysafe-release-http.log"
+              exit 1
+            fi
+            sleep 0.25
+          done
+          sudo bash scripts/bootstrap.sh \
+            --version "${VERSION}" \
+            --base-url http://127.0.0.1:18080 \
+            --control-url https://control.example.invalid \
+            --gateway disabled \
+            --dry-run
+      - name: Attest release artifacts
+        uses: actions/attest-build-provenance@v3
+        with:
+          subject-path: "dist/mysafe-*"
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release create "${VERSION}" dist/* \
+            --verify-tag \
+            --title "My Safe ${VERSION}" \
+            --generate-notes

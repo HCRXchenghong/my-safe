@@ -4,11 +4,134 @@
 >
 > 项目代号：My Safe / XGuard
 >
-> 目标平台：Ubuntu 22.04 / 24.04
+> 目标平台：Ubuntu 22.04 / 24.04、Debian 12 / 13（amd64 / arm64、systemd）
 >
 > 核心技术：Go、Nginx、Coraza WAF、MySQL / PostgreSQL、Flutter App
 >
 > 产品形态：服务器 Agent + 可选安全 BFF/WAF + 无 Web 页面的控制服务 + 手机 App + 开放 API
+
+## 当前可运行实现（2026-07-16）
+
+仓库已经从产品方案推进到可运行原型，但**尚不是可直接承诺生产安全的完整 Beta**。当前实现坚持无 Web 管理页面，并已打通 Agent、控制面和 Gateway 的真实请求链路。
+
+| 模块 | 当前能力 | 验证状态 |
+|---|---|---|
+| Control Plane | Agent 注册、Ed25519 client CA、Token+mTLS 双身份、证书轮换、幂等事件、乐观并发策略、原子审计、严格 JSON/脱敏 | 真实 TLS 注册→mTLS→轮换及策略/审计测试通过 |
+| Agent | 稳定机器身份、AES-256-GCM 队列、文件/SSH/进程/端口探针、Gateway 本地事件、单调策略、断线续传 | 正文/原始日志/命令行不出端，检测与策略真实链路通过 |
+| Gateway | Coraza 3.7 + OWASP CRS 4.25，三模式、fail-open/closed、最小化规则事件、离线 outbox | 攻击代理、秘密不出端、离线恢复组件测试通过；完整 Unix 链路待 Linux CI |
+| 数据库 | 统一 Repository 契约、PostgreSQL 14～18 与 MySQL 8.0/8.4 迁移和运行模式 | 本地契约测试框架通过；CI 配置真实双库服务 |
+| 交付 | 环境探测、Ed25519 签名清单、SHA-256、事务安装/回滚、Nginx 安全接入、Linux amd64/arm64、systemd、OpenAPI 3.1、签名发布流水线 | 故障注入、篡改拒绝、YAML/Bash/actionlint、交叉构建测试通过；真实发行版主机矩阵待跑 |
+
+### 受保护主机一键接入
+
+前提是已经部署 My Safe Control Plane，并为这台主机创建了一个短时、一次性 Bootstrap Token。正式 tag 发布后，把下面的 `<VERSION>`、控制面地址和令牌文件替换为实际值：
+
+```bash
+curl -fsSL --proto '=https' "https://github.com/HCRXchenghong/my-safe/releases/download/<VERSION>/bootstrap.sh" | sudo bash -s -- --version <VERSION> --control-url https://control.example.com --bootstrap-token-file /root/my-safe-bootstrap-token --gateway auto
+```
+
+该入口只接受 HTTPS（测试时只额外接受回环 HTTP），先使用脚本内固定的 Ed25519 公钥验证发布清单，再校验当前架构的 Installer、Agent 和 Gateway SHA-256，最后才执行环境探测与事务安装。请求版本必须与签名清单完全一致。发布公钥指纹为：
+
+```text
+SHA256:dfd8edaae2af4eb157226cb86b95353ad7dcb6cc058fe940585739e05110075b
+```
+
+`--gateway auto` 只在找到唯一、字面量、回环地址的 Nginx `proxy_pass` 时接入 Gateway；其他拓扑仍会安装 Sensor，并明确说明没有获得 WAF 流量拦截能力。高保证环境建议先下载并审阅 `bootstrap.sh`，再执行；完整边界见 [`docs/COMPATIBILITY.md`](docs/COMPATIBILITY.md)。
+
+只看计划、不写入系统：
+
+```bash
+sudo bash bootstrap.sh --version <VERSION> --control-url https://control.example.com --gateway auto --dry-run
+```
+
+### 本地快速运行
+
+要求 Go 1.26。以下 PowerShell 示例只用于本机开发，令牌不能用于生产：
+
+```powershell
+$env:MYSAFE_STORE = "memory"
+$env:MYSAFE_BOOTSTRAP_TOKEN = "local-bootstrap-token-change-me-32"
+$env:MYSAFE_ADMIN_TOKEN = "local-admin-token-change-me-32-bytes"
+go run ./cmd/mysafe-control
+```
+
+另开一个终端，注册并运行一次 Agent 扫描：
+
+```powershell
+go run ./cmd/mysafe-agent `
+  --control-url http://127.0.0.1:8080 `
+  --bootstrap-token "local-bootstrap-token-change-me-32" `
+  --state-dir ./.local/agent `
+  --once
+```
+
+查询控制面中的 Agent 和告警：
+
+```powershell
+$headers = @{ Authorization = "Bearer local-admin-token-change-me-32-bytes" }
+Invoke-RestMethod http://127.0.0.1:8080/v1/agents -Headers $headers
+Invoke-RestMethod http://127.0.0.1:8080/v1/alerts -Headers $headers
+```
+
+假设待保护业务监听 `127.0.0.1:9000`，先以观察模式启动 Gateway：
+
+```powershell
+go run ./cmd/mysafe-gateway `
+  --upstream http://127.0.0.1:9000 `
+  --address 127.0.0.1:8081 `
+  --mode observe `
+  --failure-policy fail_open
+```
+
+业务流量改为经过 `127.0.0.1:8081`。观察并调优正常流量后，再把模式切换为 `block`；不要在未知业务流量上直接开启拦截。
+
+### PostgreSQL / MySQL
+
+控制面必须显式选择存储，不会从数据库错误悄悄回退到内存：
+
+```text
+mysafe-control --store postgres --database-dsn "postgres://user:password@host:5432/mysafe?sslmode=verify-full"
+mysafe-control --store mysql --database-dsn "user:password@tcp(host:3306)/mysafe"
+```
+
+启动时默认应用嵌入式、幂等迁移。开发数据库示例位于 `deploy/compose.yaml`；生产环境应使用独立凭据、TLS、备份和受限网络，而不是示例密码。
+
+### 验证与构建
+
+```text
+go test -race ./...
+go vet ./...
+```
+
+Linux 发布构建可在 Bash 环境执行 `scripts/build.sh`，生成 Agent、Control Plane、Gateway 和 Installer 的 amd64/arm64 二进制；存在 `dpkg-deb` 时同时生成 8 个 `.deb`。全部产物进入 schema v2 签名清单和 `SHA256SUMS`。tag 任务会自验 Ed25519 清单、运行本地镜像 Bootstrap dry-run，再发布产物和构建证明。安装器记录当前版本，默认拒绝签名降级，升级失败/显式 rollback 会恢复旧二进制、配置和版本状态。
+
+CI 的兼容任务会在 Ubuntu 22.04/24.04 hosted runner 与 Debian 12/13 容器上运行环境探测和完整构建；Debian 任务还会实际 `dpkg -i` 四个 amd64 组件包。PostgreSQL 18 和 MySQL 8.4 继续运行同一数据库契约。
+
+主要目录：
+
+```text
+cmd/                    Agent、Control、Gateway、Installer、Release 命令
+internal/agent/         身份、加密队列、控制面客户端与运行循环
+internal/control/       Headless HTTP API 与鉴权
+internal/gateway/       Coraza/OWASP CRS 反向代理
+internal/store/         内存与 PostgreSQL/MySQL Repository
+internal/scanner/       只读主机清单扫描
+api/openapi.yaml        OpenAPI 3.1 契约
+deploy/                 systemd、环境示例与开发数据库
+scripts/                构建和 Ubuntu Agent 安装脚本
+scripts/package-deb.sh  Agent/Control/Gateway/Installer Debian 组件包
+docs/                   兼容矩阵与交付文档
+```
+
+### 当前安全边界与未完成范围
+
+- 非回环控制面地址只允许 HTTPS；生产模式可由 Control 生成独立 Agent CA，注册后同时校验设备 Token 和 SPIFFE URI SAN mTLS 证书，并在到期前自动轮换。证书吊销列表、OIDC 管理身份和 gRPC 尚未实现。
+- Bootstrap Token 只用于首次注册，设备凭据只返回一次；安装成功后应立即吊销或轮换 Bootstrap Token。
+- Agent 队列使用本机随机 256 位密钥加密，状态目录权限为 `0700`，但完整的硬件密钥封装与密钥轮换仍属于后续加固。
+- Gateway 不信任客户端自带的 `X-Forwarded-*`。规则命中已通过本地 outbox/Unix socket 回传 Agent；受信代理 CIDR、GeoIP 和限流仍待实现，完整 Unix 权限链路待 Linux CI/实机认证。
+- 文件轮询基线、SSH 爆破/可疑成功、进程身份与 TCP 监听变化检测已实现；inotify 加速、journalctl/hidepid 真实主机认证、异常外联、隔离区、签名处置/升级、100 个检测场景和 Flutter App 尚未完成。
+- Flutter App 属于 UI 阶段；按项目流程，必须先逐屏生成位图预览并由用户确认，之后才会实现界面和审批链路。
+- 当前版本适合继续开发、测试和安全评审，不应在未完成威胁建模、压力测试、第三方审计和灰度验证前宣称“检测所有攻击”或直接用于关键生产系统。
 
 ## 1. 项目目标
 

@@ -1,0 +1,117 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_DB: mysafe
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d mysafe"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_DATABASE: mysafe
+          MYSQL_ROOT_PASSWORD: mysql
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd "mysqladmin ping -h 127.0.0.1 -pmysql"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 30
+    env:
+      MYSAFE_TEST_POSTGRES_DSN: postgres://postgres:postgres@127.0.0.1:5432/mysafe?sslmode=disable
+      MYSAFE_TEST_MYSQL_DSN: root:mysql@tcp(127.0.0.1:3306)/mysafe
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.26.x"
+          cache: true
+      - run: go test -race ./...
+      - run: go vet ./...
+      - run: go build ./cmd/...
+
+  ubuntu-compatibility:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, ubuntu-24.04]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.26.x"
+          cache: true
+      - name: Inspect real runner environment
+        run: go run -buildvcs=false ./cmd/mysafe-installer inspect --gateway disabled --json
+      - name: Build binaries and Debian packages
+        env:
+          VERSION: v0.0.0-ci
+          OUTPUT_DIR: /tmp/mysafe-dist
+        run: |
+          set -euo pipefail
+          bash scripts/build.sh
+          for package in /tmp/mysafe-dist/*.deb; do
+            dpkg-deb --info "${package}" >/dev/null
+            dpkg-deb --contents "${package}" >/dev/null
+          done
+
+  debian-compatibility:
+    strategy:
+      fail-fast: false
+      matrix:
+        image: [debian:12-slim, debian:13-slim]
+    runs-on: ubuntu-24.04
+    container:
+      image: ${{ matrix.image }}
+    steps:
+      - name: Install compatibility prerequisites
+        run: apt-get update && apt-get install -y --no-install-recommends bash ca-certificates git gzip systemd tar
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.26.x"
+          cache: true
+      - name: Inspect real container filesystem
+        run: go run -buildvcs=false ./cmd/mysafe-installer inspect --gateway disabled --json
+      - name: Build binaries and Debian packages
+        env:
+          VERSION: v0.0.0-ci
+          OUTPUT_DIR: /tmp/mysafe-dist
+        run: |
+          set -euo pipefail
+          bash scripts/build.sh
+          for package in /tmp/mysafe-dist/*.deb; do
+            dpkg-deb --info "${package}" >/dev/null
+            dpkg-deb --contents "${package}" >/dev/null
+          done
+          dpkg -i /tmp/mysafe-dist/mysafe-agent-linux-amd64.deb
+          dpkg -i /tmp/mysafe-dist/mysafe-control-linux-amd64.deb
+          dpkg -i /tmp/mysafe-dist/mysafe-installer-linux-amd64.deb
+          dpkg -i /tmp/mysafe-dist/mysafe-gateway-linux-amd64.deb
+          test -x /usr/local/bin/mysafe-agent
+          test -x /usr/local/bin/mysafe-control
+          test -x /usr/local/bin/mysafe-gateway
+          test -x /usr/local/bin/mysafe-installer
+          id my-safe
+          id my-safe-control
+          id my-safe-gateway

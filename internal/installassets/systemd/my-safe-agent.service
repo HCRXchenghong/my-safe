@@ -1,0 +1,43 @@
+[Unit]
+Description=My Safe server security agent
+Documentation=https://github.com/HCRXchenghong/my-safe
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=my-safe
+Group=my-safe
+SupplementaryGroups=adm systemd-journal
+EnvironmentFile=/etc/my-safe/agent.env
+ExecStart=/usr/local/bin/mysafe-agent
+Restart=on-failure
+RestartSec=10s
+TimeoutStopSec=20s
+UMask=0077
+RuntimeDirectory=my-safe
+RuntimeDirectoryMode=0750
+
+# Baseline sandbox. Add narrowly scoped read access only when a detector needs it.
+NoNewPrivileges=true
+PrivateDevices=true
+PrivateTmp=true
+ProtectClock=true
+ProtectControlGroups=true
+ProtectHome=true
+ProtectHostname=true
+ProtectKernelLogs=true
+ProtectKernelModules=true
+ProtectKernelTunables=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/my-safe
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=true
+RestrictRealtime=true
+LockPersonality=true
+MemoryDenyWriteExecute=true
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+
+[Install]
+WantedBy=multi-user.target

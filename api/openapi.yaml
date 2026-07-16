@@ -1,0 +1,531 @@
+openapi: 3.1.0
+info:
+  title: My Safe Control Plane API
+  version: 0.1.0
+  description: Headless API for the first runnable My Safe prototype. It intentionally serves no HTML UI.
+servers:
+  - url: https://control.example.com
+security: []
+paths:
+  /healthz:
+    get:
+      operationId: health
+      summary: Check process health
+      responses:
+        "200":
+          description: Process is accepting requests
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Health"
+  /v1/agents/register:
+    post:
+      operationId: registerAgent
+      summary: Register an Agent with a short-lived bootstrap token
+      security:
+        - bootstrapBearer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RegistrationRequest"
+      responses:
+        "201":
+          description: Agent registered; the device credential is returned exactly once
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RegistrationResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          description: Machine is already registered
+  /v1/agents/{agentID}/heartbeat:
+    parameters:
+      - $ref: "#/components/parameters/AgentID"
+    post:
+      operationId: heartbeatAgent
+      summary: Update authenticated Agent liveness
+      security:
+        - agentBearer: []
+          agentMTLS: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/HeartbeatRequest"
+      responses:
+        "200":
+          description: Heartbeat accepted
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+  /v1/agents/{agentID}/events:
+    parameters:
+      - $ref: "#/components/parameters/AgentID"
+    post:
+      operationId: ingestAgentEvents
+      summary: Upload one idempotent batch of minimized security events
+      security:
+        - agentBearer: []
+          agentMTLS: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [events]
+              properties:
+                events:
+                  type: array
+                  minItems: 1
+                  maxItems: 100
+                  items:
+                    $ref: "#/components/schemas/EventInput"
+      responses:
+        "202":
+          description: Batch accepted; duplicate event IDs are ignored
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [accepted, duplicates]
+                properties:
+                  accepted:
+                    type: integer
+                  duplicates:
+                    type: integer
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+  /v1/agents/{agentID}/certificate:
+    parameters:
+      - $ref: "#/components/parameters/AgentID"
+    post:
+      operationId: renewAgentCertificate
+      summary: Rotate an Agent client certificate using its current mTLS identity
+      security:
+        - agentBearer: []
+          agentMTLS: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [client_csr]
+              properties:
+                client_csr:
+                  type: string
+                  maxLength: 32768
+      responses:
+        "200":
+          description: New short-lived client certificate and its issuing CA
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CertificateResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+  /v1/agents:
+    get:
+      operationId: listAgents
+      summary: List registered Agents without credential material
+      security:
+        - adminBearer: []
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "200":
+          description: Registered Agents
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [agents]
+                properties:
+                  agents:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Agent"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+  /v1/agents/{agentID}/policy:
+    parameters:
+      - $ref: "#/components/parameters/AgentID"
+    get:
+      operationId: getAgentPolicy
+      summary: Fetch the current bounded Agent detector policy
+      security:
+        - agentBearer: []
+          agentMTLS: []
+      responses:
+        "200":
+          description: Current Agent policy
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Policy"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          description: No policy has been configured
+    put:
+      operationId: putAgentPolicy
+      summary: Atomically update an Agent policy and append its audit record
+      security:
+        - adminBearer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PolicyUpdate"
+      responses:
+        "200":
+          description: Updated policy
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Policy"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          description: expected_revision did not match the current revision
+  /v1/audit-logs:
+    get:
+      operationId: listAuditLogs
+      summary: List append-only administrative audit records
+      security:
+        - adminBearer: []
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "200":
+          description: Audit records ordered newest first
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [audit_logs]
+                properties:
+                  audit_logs:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/AuditLog"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+  /v1/alerts:
+    get:
+      operationId: listAlerts
+      summary: List normalized and redacted security observations
+      security:
+        - adminBearer: []
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+        - name: severity
+          in: query
+          schema:
+            $ref: "#/components/schemas/Severity"
+      responses:
+        "200":
+          description: Security observations ordered by receive time
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [alerts]
+                properties:
+                  alerts:
+                    type: array
+                    items:
+                      $ref: "#/components/schemas/Event"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+components:
+  securitySchemes:
+    bootstrapBearer:
+      type: http
+      scheme: bearer
+      description: Short-lived registration token; remove it after enrollment.
+    agentBearer:
+      type: http
+      scheme: bearer
+      description: Per-Agent random credential returned once at registration.
+    agentMTLS:
+      type: mutualTLS
+      description: Short-lived Ed25519 client certificate whose SPIFFE URI SAN is bound to the Agent ID.
+    adminBearer:
+      type: http
+      scheme: bearer
+      description: Independent control-plane administration token.
+  parameters:
+    AgentID:
+      name: agentID
+      in: path
+      required: true
+      schema:
+        type: string
+        maxLength: 64
+    Limit:
+      name: limit
+      in: query
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 500
+        default: 100
+  responses:
+    BadRequest:
+      description: Request did not satisfy the strict JSON or validation contract
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+    Unauthorized:
+      description: Missing or invalid bearer credential
+      content:
+        application/problem+json:
+          schema:
+            $ref: "#/components/schemas/Problem"
+  schemas:
+    Health:
+      type: object
+      additionalProperties: false
+      required: [status]
+      properties:
+        status:
+          const: ok
+    RegistrationRequest:
+      type: object
+      additionalProperties: false
+      required: [machine_id, hostname, version, platform, architecture]
+      properties:
+        machine_id:
+          type: string
+          maxLength: 128
+        hostname:
+          type: string
+          maxLength: 255
+        version:
+          type: string
+          maxLength: 64
+        platform:
+          type: string
+          maxLength: 32
+        architecture:
+          type: string
+          maxLength: 32
+        client_csr:
+          type: string
+          maxLength: 32768
+    RegistrationResponse:
+      type: object
+      additionalProperties: false
+      required: [agent_id, credential]
+      properties:
+        agent_id:
+          type: string
+        credential:
+          type: string
+          writeOnly: true
+        client_certificate:
+          type: string
+          writeOnly: true
+        client_ca_certificate:
+          type: string
+    CertificateResponse:
+      type: object
+      additionalProperties: false
+      required: [agent_id, client_certificate, client_ca_certificate]
+      properties:
+        agent_id:
+          type: string
+        client_certificate:
+          type: string
+          writeOnly: true
+        client_ca_certificate:
+          type: string
+    HeartbeatRequest:
+      type: object
+      additionalProperties: false
+      required: [agent_version, queue_depth]
+      properties:
+        agent_version:
+          type: string
+          maxLength: 64
+        queue_depth:
+          type: integer
+          minimum: 0
+          maximum: 1000000
+    PolicyUpdate:
+      type: object
+      additionalProperties: false
+      required: [expected_revision, file_integrity_enabled, file_watch_paths, ssh_auth_enabled, ssh_threshold, ssh_window_seconds, runtime_watch_enabled]
+      properties:
+        expected_revision:
+          type: integer
+          minimum: 0
+        file_integrity_enabled:
+          type: boolean
+        file_watch_paths:
+          type: array
+          maxItems: 64
+          uniqueItems: true
+          items:
+            type: string
+            maxLength: 512
+        ssh_auth_enabled:
+          type: boolean
+        ssh_threshold:
+          type: integer
+          minimum: 2
+          maximum: 100
+        ssh_window_seconds:
+          type: integer
+          minimum: 10
+          maximum: 86400
+        runtime_watch_enabled:
+          type: boolean
+    Policy:
+      type: object
+      additionalProperties: false
+      required: [id, agent_id, revision, file_integrity_enabled, file_watch_paths, ssh_auth_enabled, ssh_threshold, ssh_window_seconds, runtime_watch_enabled, updated_at]
+      properties:
+        id:
+          type: string
+        agent_id:
+          type: string
+        revision:
+          type: integer
+          minimum: 1
+        file_integrity_enabled:
+          type: boolean
+        file_watch_paths:
+          type: array
+          maxItems: 64
+          uniqueItems: true
+          items:
+            type: string
+            maxLength: 512
+        ssh_auth_enabled:
+          type: boolean
+        ssh_threshold:
+          type: integer
+          minimum: 2
+          maximum: 100
+        ssh_window_seconds:
+          type: integer
+          minimum: 10
+          maximum: 86400
+        runtime_watch_enabled:
+          type: boolean
+        updated_at:
+          type: string
+          format: date-time
+    AuditLog:
+      type: object
+      additionalProperties: false
+      required: [id, actor, action, resource, occurred_at]
+      properties:
+        id:
+          type: string
+        actor:
+          type: string
+        action:
+          type: string
+        resource:
+          type: string
+        occurred_at:
+          type: string
+          format: date-time
+        details:
+          type: object
+          additionalProperties: true
+    Severity:
+      type: string
+      enum: [info, low, medium, high, critical]
+    EventInput:
+      type: object
+      additionalProperties: false
+      required: [id, kind, severity, summary, occurred_at]
+      properties:
+        id:
+          type: string
+          maxLength: 128
+        kind:
+          type: string
+          maxLength: 128
+        severity:
+          $ref: "#/components/schemas/Severity"
+        summary:
+          type: string
+          maxLength: 2048
+        occurred_at:
+          type: string
+          format: date-time
+        evidence:
+          type: object
+          maxProperties: 256
+          additionalProperties: true
+    Event:
+      allOf:
+        - $ref: "#/components/schemas/EventInput"
+        - type: object
+          required: [agent_id, received_at]
+          properties:
+            agent_id:
+              type: string
+            received_at:
+              type: string
+              format: date-time
+    Agent:
+      type: object
+      additionalProperties: false
+      required: [id, machine_id, hostname, version, platform, architecture, registered_at, last_seen_at]
+      properties:
+        id:
+          type: string
+        machine_id:
+          type: string
+        hostname:
+          type: string
+        version:
+          type: string
+        platform:
+          type: string
+        architecture:
+          type: string
+        registered_at:
+          type: string
+          format: date-time
+        last_seen_at:
+          type: string
+          format: date-time
+    Problem:
+      type: object
+      required: [type, title, status, detail]
+      properties:
+        type:
+          type: string
+        title:
+          type: string
+        status:
+          type: integer
+        detail:
+          type: string
